@@ -2,31 +2,34 @@ setwd(normalizePath(dirname(R.utils::commandArgs(asValues=TRUE)$"f")))
 source("../../../scripts/h2o-r-test-setup.R")
 
 test.gbm <- function() {
-  browser()
-  x <- h2o.importFile(locate("bigdata/laptop/jira/reproducibility_issue.csv.zip"))
-
-  # AUC thresholds run with 8 nodes from another machine.  Test results should match this.
-  seeds = c(-8736384372227723979, 8568380275437571355, 6262970961823075204)
-  trees = c(10, 20, 30)
-  csvFiles = c(locate('bigdata/laptop/jira/threshold_n8_10t_2d_sn8736384372227723979.csv'),
-               locate('bigdata/laptop/jira/threshold_n8_20t_2d_s8568380275437571355.csv'),
-               locate('bigdata/laptop/jira/threshold_n8_30t_2d_sn6262970961823075204.csv'))
+  # Determine model sizes
+  seeds = c(987654321, 123456789, 1029384756)
   index = sample(c(1:length(seeds)))[1]
-
-  # Train Model
-  gbm_v1 <- TrainGBM(x, "gbm_2T_3D_n3.hex", seeds[index], trees[index])
-  auc_gbm = gbm_v1@model$training_metrics@metrics$thresholds_and_metric_scores$threshold
-  auc_other = read.csv(csvFiles[index], header=T)[,2]
-  expect_equal(auc_gbm, auc_other)
-
+  
+  auc_run1 <- TrainGBM(seeds[index], TRUE)
+  auc_run2 <- TrainGBM(seeds[index], TRUE)
+  expect_equal(auc_run1, auc_run2)
+  auc_run3 <- TrainGBM(seeds[index], FALSE)
+  
+  auc_h2o <- as.data.frame(auc_run1)  # extract h2o gbm auc threshold values
+  auc_h2o3 <- as.data.frame(auc_run3)
+  stopifnot(length(setdiff(auc_h2o, auc_h2o3))>0)   # throw an error if  matching answer
 }
 
 # borrowed from Megan K
-TrainGBM <- function(data, model_id, seedNum, nTrees) {
-  h2o.gbm(x=2:365, y='response', training_frame = data,
-          distribution = "bernoulli", ntrees = nTrees, seed = seedNum, max_depth = 2, min_rows = 7,
-          model_id= model_id, score_tree_interval=nTrees
+TrainGBM <- function(seedNum, trueRepo) {
+  # data_path <- locate("bigdata/laptop/jira/reproducibility_issue.csv.zip")
+  # temp <- h2o.importFile(data_path, parse=FALSE)
+  # x <- h2o.parseSetup(temp, chunk_size=18691584)
+  data <- h2o.importFile(locate("bigdata/laptop/jira/reproducibility_issue.csv.zip"))
+  gbm_v1 <- h2o.gbm(x=2:365, y='response', training_frame = data,
+          distribution = "bernoulli", ntrees = 50, seed = seedNum, max_depth = 4, min_rows = 7,
+          score_tree_interval=50, true_reproducibility=trueRepo
   )
+  auc_gbm = gbm_v1@model$training_metrics@metrics$thresholds_and_metric_scores$threshold
+  h2o.rm(data)
+  h2o.rm(gbm_v1)
+  auc_gbm
 }
 
 doTest("GBM reproducibility test", test.gbm)

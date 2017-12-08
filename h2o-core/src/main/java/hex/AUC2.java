@@ -9,6 +9,7 @@ import water.util.fp.Function;
 import water.util.fp.Functions;
 
 import java.util.Arrays;
+import java.util.PriorityQueue;
 
 import static hex.AUC2.ThresholdCriterion.precision;
 import static hex.AUC2.ThresholdCriterion.recall;
@@ -141,7 +142,7 @@ public class AUC2 extends Iced {
 
   public AUC2( AUCBuilder bldr ) {
     // Copy result arrays into base object, shrinking to match actual bins
-    bldr.removeDupsShrink(NBINS, false); // make sure arrays are at correct size
+    bldr.removeDupsShrinkSp(NBINS, false); // make sure arrays are at correct size
 
     _nBins = bldr._n;
     assert _nBins >= 1 : "Must have >= 1 bins for AUC calculation, but got " + _nBins;
@@ -246,9 +247,8 @@ public class AUC2 extends Iced {
     final double _fps[];        // Histogram bins, false positives
     // Merging this bin with the next gives the least increase in squared
     // error, or -1 if not known.  Requires a linear scan to find.
-    int    _ssx;
+    int _ssx;
     public boolean _reproducibilityError = false;  // true if potential reproducibility can happen
-    public int mergeStep = -1;  // denote start of merge.
 
     public AUCBuilder(int nBins) {
       this(nBins, nBins);
@@ -257,43 +257,44 @@ public class AUC2 extends Iced {
     public AUCBuilder(int nBins, int workingNBins) {
       _nBins = nBins;
       _workingNBins = Math.max(nBins, workingNBins);
-      _ths = new double[_workingNBins<<1]; // Threshold; also the mean for this bin
-      _sqe = new double[_workingNBins<<1]; // Squared error (variance) in this bin
-      _tps = new double[_workingNBins<<1]; // True  positives
-      _fps = new double[_workingNBins<<1]; // False positives
+      _ths = new double[_workingNBins << 1]; // Threshold; also the mean for this bin
+      _sqe = new double[_workingNBins << 1]; // Squared error (variance) in this bin
+      _tps = new double[_workingNBins << 1]; // True  positives
+      _fps = new double[_workingNBins << 1]; // False positives
       _ssx = -1;
     }
 
-    public void perRow(double pred, int act, double w ) {
+    public void perRow(double pred, int act, double w) {
       // Insert the prediction into the set of histograms in sorted order, as
       // if its a new histogram bin with 1 count.
       assert !Double.isNaN(pred);
-      assert act==0 || act==1;  // Actual better be 0 or 1
+      assert act == 0 || act == 1;  // Actual better be 0 or 1
 
-      int idx = Arrays.binarySearch(_ths,0,_n,pred);
-      if( idx >= 0 ) {          // Found already in histogram; merge results
-        if( act==0 ) _fps[idx]+=w; else _tps[idx]+=w; // One more count; no change in squared error
+      int idx = Arrays.binarySearch(_ths, 0, _n, pred);
+      if (idx >= 0) {          // Found already in histogram; merge results
+        if (act == 0) _fps[idx] += w;
+        else _tps[idx] += w; // One more count; no change in squared error
         _ssx = -1;              // Blows the known best merge
         return;
       }
-      idx = -idx-1;             // Get index to insert at
+      idx = -idx - 1;             // Get index to insert at
 
       // If already full bins, try to instantly merge into an existing bin
-      if( _n > _workingNBins ) {       // Need to merge to shrink things, this can cause reproducibility issue
-        _reproducibilityError = true;
+      if (_n > _nBins) {       // Need to merge to shrink things, this can cause reproducibility issue
         final int ssx = find_smallest();
-        double dssx = compute_delta_error(_ths[ssx+1],k(ssx+1),_ths[ssx],k(ssx));
+        double dssx = compute_delta_error(_ths[ssx + 1], k(ssx + 1), _ths[ssx], k(ssx));
 
         // See if this point will fold into either the left or right bin
         // immediately.  This is the desired fast-path.
-        double d0 = compute_delta_error(pred,w,_ths[idx  ],k(idx  ));
-        double d1 = compute_delta_error(_ths[idx+1],k(idx+1),pred,w);
-        if( d0 < dssx || d1 < dssx ) {
-          if( d1 < d0 ) idx++; else d0 = d1; // Pick correct bin
+        double d0 = compute_delta_error(pred, w, _ths[idx], k(idx));
+        double d1 = compute_delta_error(_ths[idx + 1], k(idx + 1), pred, w);
+        if (d0 < dssx || d1 < dssx) {
+          if (d1 < d0) idx++;
+          else d0 = d1; // Pick correct bin
           double oldk = k(idx);
-          if( act==0 ) _fps[idx]+=w;
-          else         _tps[idx]+=w;
-          _ths[idx] = _ths[idx] + (pred-_ths[idx])/oldk;
+          if (act == 0) _fps[idx] += w;
+          else _tps[idx] += w;
+          _ths[idx] = _ths[idx] + (pred - _ths[idx]) / oldk;
           _sqe[idx] = _sqe[idx] + d0;
           assert ssx == find_smallest();
         }
@@ -324,68 +325,79 @@ public class AUC2 extends Iced {
       }
 
       // Merge duplicate rows in _ths.  May require many merges.  May or may  not cause reproducibility issue
-      removeDupsShrink(_workingNBins, true);
+      removeDupsShrinkSp(_nBins, false);
     }
 
     // Merge duplicate rows in all 4 arrays.
-    public void removeDupsShrink(int maxBinSize, boolean setrError) {
+    public void removeDupsShrinkSp(int maxBinSize, boolean setrError) {
       // Merge duplicate rows in _ths.  May require many merges.
       int startIndex = 0;
-      if (_n > maxBinSize && setrError)
-        _reproducibilityError = true;
+      while ((dups(startIndex)) && (startIndex < _n)) // first remove all duplicates
+        startIndex = mergeDupBin();
 
-      while( (dups(startIndex) && (startIndex < _n)) ||  _n > maxBinSize) {
-        startIndex = mergeOneBin();
+      if (_n > maxBinSize) {
+        mergeHistBins(maxBinSize);
+        if (setrError)
+          _reproducibilityError = true;
       }
     }
 
-    public void reduce( AUCBuilder bldr ) {
+    // Can speed this one up
+    public void reduce(AUCBuilder bldr) {
       // Merge sort the 2 sorted lists into the double-sized arrays.  The tail
       // half of the double-sized array is unused, but the front half is
       // probably a source.  Merge into the back.
       //assert sorted();
       //assert bldr.sorted();
-      int x=     _n-1;
-      int y=bldr._n-1;
-      while( x+y+1 >= 0 ) {
-        if ((x+y+1) >= _ths.length)
+      int x = _n - 1;
+      int y = bldr._n - 1;
+      while (x + y + 1 >= 0) {
+        if ((x + y + 1) >= _ths.length)
           System.out.println("Aren't we screwed.");
 
         boolean self_is_larger = y < 0 || (x >= 0 && _ths[x] >= bldr._ths[y]);
         AUCBuilder b = self_is_larger ? this : bldr;
-        int      idx = self_is_larger ?   x  :   y ;
-        _ths[x+y+1] = b._ths[idx];
-        _sqe[x+y+1] = b._sqe[idx];
-        _tps[x+y+1] = b._tps[idx];
-        _fps[x+y+1] = b._fps[idx];
-        if( self_is_larger ) x--; else y--;
+        int idx = self_is_larger ? x : y;
+        _ths[x + y + 1] = b._ths[idx];
+        _sqe[x + y + 1] = b._sqe[idx];
+        _tps[x + y + 1] = b._tps[idx];
+        _fps[x + y + 1] = b._fps[idx];
+        if (self_is_larger) x--;
+        else y--;
       }
       _n += bldr._n;
       //assert sorted();
 
       // Merge duplicate rows in _ths.  May require many merges.  May or may  not cause reproducibility issue
-      removeDupsShrink(_workingNBins, true);
+      removeDupsShrinkSp(_workingNBins, true);
     }
 
-    private int mergeOneBin( ) {
+    // update all the arrays based on which two bins to merge
+    public void updateArrays(int ssx) {
+      double k0 = k(ssx);
+      double k1 = k(ssx + 1);
+      _ths[ssx]=(_ths[ssx]*k0 +_ths[ssx+1]*k1)/(k0+k1);
+      _sqe[ssx]=_sqe[ssx]+_sqe[ssx+1]+ compute_delta_error(_ths[ssx+1], k1, _ths[ssx], k0);
+
+      _tps[ssx]+=_tps[ssx+1];
+      _fps[ssx]+=_fps[ssx+1];
+ //     Log.info("merge index is "+ssx+" and new sqe value is "+_sqe[ssx]+" and ths is "+_ths[ssx]);
+      // Slide over to crush the removed bin at index (ssx+1)
+      if (_n-ssx-2 > 0) { // only need to copy over if we are not updating the next to last element
+        System.arraycopy(_ths, ssx + 2, _ths, ssx + 1, _n - ssx - 2);
+        System.arraycopy(_sqe, ssx + 2, _sqe, ssx + 1, _n - ssx - 2);
+        System.arraycopy(_tps, ssx + 2, _tps, ssx + 1, _n - ssx - 2);
+        System.arraycopy(_fps, ssx + 2, _fps, ssx + 1, _n - ssx - 2);
+      }
+      _n--;
+    }
+
+    private int mergeDupBin() {
       // Too many bins; must merge bins.  Merge into bins with least total
       // squared error.  Horrible slowness linear arraycopy.
-      int ssx = (_ssx > 0)? _ssx : find_smallest(); // Dups() will set _ssx
+      int ssx = _ssx; // Dups() will set _ssx
+      updateArrays(ssx);
 
-      // Merge two bins.  Classic bins merging by averaging the histogram
-      // centers based on counts.
-      double k0 = k(ssx);
-      double k1 = k(ssx+1);
-      _ths[ssx] = (_ths[ssx]*k0 + _ths[ssx+1]*k1) / (k0+k1);
-      _sqe[ssx] = _sqe[ssx]+_sqe[ssx+1]+compute_delta_error(_ths[ssx+1],k1,_ths[ssx],k0);
-      _tps[ssx] += _tps[ssx+1];
-      _fps[ssx] += _fps[ssx+1];
-      // Slide over to crush the removed bin at index (ssx+1)
-      System.arraycopy(_ths,ssx+2,_ths,ssx+1,_n-ssx-2);
-      System.arraycopy(_sqe,ssx+2,_sqe,ssx+1,_n-ssx-2);
-      System.arraycopy(_tps,ssx+2,_tps,ssx+1,_n-ssx-2);
-      System.arraycopy(_fps,ssx+2,_fps,ssx+1,_n-ssx-2);
-      _n--;
       _ssx = -1;   // reset so that the next mergeOneBin() can start over
       return ssx;
     }
@@ -398,57 +410,196 @@ public class AUC2 extends Iced {
     // tried the original: merge bins with the least distance between bin
     // centers.  Same problem for sorted data.
     private int find_smallest() {
-      if( _ssx == -1 ) return (_ssx = find_smallest_impl());
+      if (_ssx == -1) return (_ssx = find_smallest_impl());
       assert _ssx == find_smallest_impl();
       return _ssx;
     }
+
     private int find_smallest_impl() {
       double minSQE = Double.MAX_VALUE;
       int minI = -1;
       int n = _n;
-      for( int i=0; i<n-1; i++ ) {
-        double derr = compute_delta_error(_ths[i+1],k(i+1),_ths[i],k(i));
-        if( derr == 0 ) return i; // Dup; no increase in SQE so return immediately
-        double sqe = _sqe[i]+_sqe[i+1]+derr;
-        if( sqe < minSQE ) {
-          minI = i;  minSQE = sqe;
+      for (int i = 0; i < n - 1; i++) {
+        double derr = compute_delta_error(_ths[i + 1], k(i + 1), _ths[i], k(i));
+        if (derr == 0) return i; // Dup; no increase in SQE so return immediately
+        double sqe = _sqe[i] + _sqe[i + 1] + derr;
+        if (sqe < minSQE) {
+          minI = i;
+          minSQE = sqe;
         }
       }
       return minI;
     }
 
+    /*
+    Find duplicates in the array _ths.  If foound will return true else return false
+     */
     private boolean dups(int init_index) {
       int n = _n;
-      for( int i=init_index; i<n-1; i++ ) {
-        double derr = compute_delta_error(_ths[i+1],k(i+1),_ths[i],k(i));
-        if( derr == 0 ) { _ssx = i; return true; }
+      for (int i = init_index; i < n - 1; i++) {
+        double derr = compute_delta_error(_ths[i + 1], k(i + 1), _ths[i], k(i));
+        if (derr == 0) {
+          _ssx = i;
+          return true;
+        }
       }
       return false;
     }
 
-
-    private double compute_delta_error( double ths1, double n1, double ths0, double n0 ) {
+    private double compute_delta_error(double ths1, double n1, double ths0, double n0) {
       // If thresholds vary by less than a float ULP, treat them as the same.
       // Some models only output predictions to within float accuracy (so a
       // variance here is junk), and also it's not statistically sane to have
       // a model which varies predictions by such a tiny change in thresholds.
-      double delta = (float)ths1-(float)ths0;
+      double delta = (float) ths1 - (float) ths0;
       // Parallel equation drawn from:
       //  http://en.wikipedia.org/wiki/Algorithms_for_calculating_variance#Online_algorithm
-      return delta*delta*n0*n1 / (n0+n1);
+      return delta * delta * n0 * n1 / (n0 + n1);
     }
 
-    private double k( int idx ) { return _tps[idx]+_fps[idx]; }
+    private double k(int idx) {
+      return _tps[idx] + _fps[idx];
+    }
 
-    //private boolean sorted() {
-    //  double t = _ths[0];
-    //  for( int i=1; i<_n; i++ ) {
-    //    if( _ths[i] < t )
-    //      return false;
-    //    t = _ths[i];
-    //  }
-    //  return true;
-    //}
+
+    // speed up version of mergeOneBin.  This method will merge all _n bins down to nWorkingBins.
+    private void mergeHistBins( int nWorkingBins ) {
+      int numberOfMerge = _n-nWorkingBins;
+
+      if (numberOfMerge < 0)  // nothing to merge
+        return;
+
+      int queueS = Math.min(_n, numberOfMerge*2); // use a heap bigger than the size of number of bins to merge
+      RowValue[] sortArray = new RowValue[queueS];  // store sorted arrays from a heap
+      PriorityQueue sortSQ = new PriorityQueue<RowValue<Double>>(); // Priority queue
+      buildSeqHeap(sortSQ, queueS); // build PQ that contains the queueS lowerest Seq
+
+      // copy the heap into array sortArray
+      int counter = 0;
+      queueS = sortSQ.size(); // actual number of elements in the heap
+      while (sortSQ.size() > 0) { // copy PQ to array where we can change each element
+        sortArray[counter] = (RowValue) sortSQ.poll();
+        sortArray[counter++]._flip=1;
+      }
+
+      // rebuild PQ with sortArray copy so that the min sqe is on top
+      for (int index=0; index < counter; index++)
+        sortSQ.offer(new RowValue(sortArray[index]._rowIndex, sortArray[index]._value, 1));
+
+      // merge all the bins needed to make final histogram contains only NBINS (400)
+      for (int binIndex=numberOfMerge; binIndex > 0; binIndex--) {
+        RowValue tempPair = (RowValue) sortSQ.peek(); // peek at row with smallest SE
+        int bestIndex = tempPair._rowIndex;
+        updateArrays(bestIndex);  // update the 4 arrays with latest merge result
+        // extract heap into array and update elements after merge
+        extractPQToArray(sortSQ, sortArray, --queueS, bestIndex);
+        // build the new PQ again with updated elements with smallest sqe on top again
+        for (int rInd = 0; rInd < queueS; rInd++) {
+          sortSQ.offer(new RowValue(sortArray[rInd]._rowIndex, sortArray[rInd]._value, 1));
+        }
+      }
+    }
+
+    /*
+    Build a PriorityQueue with value sorted on sqe.  This heap will store the queueS smallest
+    sqe values.
+     */
+    public void buildSeqHeap(PriorityQueue sortedP, int maxSize) {
+      int n = _n-1;
+      for (int i = 0; i < n; i++) { // build PQ with queueS smallest rows
+        double derr = compute_delta_error(_ths[i + 1], k(i + 1), _ths[i], k(i));
+        double sqe = _sqe[i] + _sqe[i + 1] + derr;
+        RowValue currPair = new RowValue(i, sqe, -1);
+        sortedP.offer(currPair);   // add pair to PriorityQueue
+        if (sortedP.size() > maxSize) {
+          sortedP.poll();      // remove head if exceeds queue size
+        }
+      }
+    }
+
+    // This method will extract the PQ into an array.
+    // If found element with index = pIndex+1, remove this element;
+    // If found elements with index > pIndex+1, change the index to index-1
+    // If found elements with index = pIndex-1 or pIndex, update its value with new sqe
+    public void extractPQToArray(PriorityQueue sortPQ, RowValue[] sortArr, int eleMerge,  int pIndex) {
+      int indexRemove = pIndex+1;
+      int indexChange = pIndex-1;
+      int counter = 0;
+      boolean foundEleBefore = false; // indicate if element with index pIndex-1 is in the heap
+      int eleExtract = Math.min(sortPQ.size(), eleMerge); // only process a limited number of elements
+
+      for (int index=0; index < eleExtract; index++) {
+        RowValue tempPair = (RowValue) sortPQ.poll();
+        boolean updated = false;
+        int rowIndex = tempPair._rowIndex;
+        if (rowIndex == indexRemove) { // do not process this element to array, skip it
+          continue;
+        } else if (rowIndex < indexChange) {  // for early rows, just copy over value to sortArr
+          updated=updateOneArrayElement(sortArr, counter, rowIndex, (double) tempPair._value);
+        } else if (rowIndex == indexChange || rowIndex == pIndex) { // change the value at pIndex-1 and at pIndex
+          if (rowIndex == indexChange)
+            foundEleBefore = true;
+          double newSqe = _sqe[rowIndex] + _sqe[rowIndex+1] +
+                  compute_delta_error(_ths[rowIndex+1], k(rowIndex+1), _ths[rowIndex], k(rowIndex));
+          updated=updateOneArrayElement(sortArr, counter, rowIndex, newSqe);
+        } else if (rowIndex > pIndex) {  // reduce row index by one
+          updated=updateOneArrayElement(sortArr, counter, rowIndex-1, (double) tempPair._value);
+        }
+        if (updated)  // only update counter if valid entry is found
+          counter++;
+      }
+
+      if (!foundEleBefore && indexChange >= 0) {  // element before pIndex is not found in heap, add it to heap
+        double newSqe = _sqe[indexChange] + _sqe[indexChange+1] +
+                compute_delta_error(_ths[indexChange+1], k(indexChange+1), _ths[indexChange], k(indexChange));
+        updateOneArrayElement(sortArr, counter-1, indexChange, newSqe);
+      }
+    }
+
+    // given the index of the array, will update it with the updateVal inside the arrayToUpdate array
+    public boolean updateOneArrayElement(RowValue[] arrayToUpdate, int updateIndex, int rowIndex, double updateVal) {
+      if (rowIndex < 0) // something is wrong, we got a negative index
+        return false;
+
+      if (arrayToUpdate[updateIndex] == null) { // only allocate memory if needed, otherwise, update its value
+        arrayToUpdate[updateIndex] = new RowValue(rowIndex, updateVal, 1);
+      } else {
+        arrayToUpdate[updateIndex]._rowIndex = rowIndex;
+        arrayToUpdate[updateIndex]._value = updateVal;
+      }
+      return true;
+    }
+  }
+
+  /*
+  Small class to implement priority entry is a key/value pair of original row index and the
+  corresponding value.  Implemented the compareTo function and comparison is performed on
+  the value.  If _flip is -1, the PQ will store the N lowerest values.  If _flip is 1, the
+  PQ will store elements with smallest as head.
+   */
+  public static class RowValue<E extends Comparable<E>> implements Comparable<RowValue<E>> {
+    private int _rowIndex;
+    private E _value;
+    private int _flip; // multiply result by -1 if you want max value at top of tree
+
+    public RowValue(int rowIndex, E value, int flip) {
+      this._rowIndex = rowIndex;
+      this._value = value;
+      this._flip = flip;
+    }
+
+    public E getValue() {
+      return this._value;
+    }
+
+    public long getRow() {
+      return this._rowIndex;
+    }
+
+    @Override
+    public int compareTo(RowValue<E> other) {
+      return (this.getValue().compareTo(other.getValue())*_flip);
+    }
   }
 
 

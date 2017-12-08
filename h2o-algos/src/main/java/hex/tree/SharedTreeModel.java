@@ -28,6 +28,8 @@ public abstract class SharedTreeModel<
         O extends SharedTreeModel.SharedTreeOutput
         > extends Model<M, P, O> implements Model.LeafNodeAssignment, Model.GetMostImportantFeatures {
 
+  private int _nWorkingBins = 4000; // From experiment, this will take a maximum of 12 secs to score;
+
   @Override
   public String[] getMostImportantFeatures(int n) {
     if (_output == null) return null;
@@ -77,8 +79,6 @@ public abstract class SharedTreeModel<
     public boolean _calibrate_model = false; // Use Platt Scaling
     public Key<Frame> _calibration_frame;
 
-    public int _nBinsAUC2 = -1;  // used to control number of bins to gather the AUC2 arrays.
-
     public Frame calib() { return _calibration_frame == null ? null : _calibration_frame.get(); }
 
     @Override public long progressUnits() { return _ntrees + (_histogram_type==HistogramType.QuantilesGlobal || _histogram_type==HistogramType.RoundRobin ? 1 : 0); }
@@ -122,7 +122,7 @@ public abstract class SharedTreeModel<
 
   @Override public ModelMetricsSupervised.MetricBuilderSupervised makeMetricBuilder(String[] domain) {
     switch(_output.getModelCategory()) {
-      case Binomial: return new ModelMetricsBinomial.MetricBuilderBinomial(domain, setAUCWorkingBinSize(_parms.train().numRows()));
+      case Binomial: return new ModelMetricsBinomial.MetricBuilderBinomial(domain, setAUCWorkingBinSize(_parms.train().anyVec().nChunks()));
       case Multinomial: return new ModelMetricsMultinomial.MetricBuilderMultinomial(_output.nclasses(),domain);
       case Regression:  return new ModelMetricsRegression.MetricBuilderRegression();
       default: throw H2O.unimpl();
@@ -130,23 +130,19 @@ public abstract class SharedTreeModel<
   }
 
   // current AUC2.NBINS = 400 only.  During mergeOneBin operation, depending on the chunking situation, we
-  // can get different final results.  Hence, I am proposing to use a larger bin size during the data
-  // collection process to avoid bin merging.  This is done by using the largest bin size necessary which
-  // is 2*trainining frame row count.  However, when this takes up too much memory, we will try to shrink
-  // the working bin size in order to fit the memory.  When this happens, perfect reproducibility across
-  // different network sizes may not be possible.  To avoid this, call GBM with fewer trees and/or shallower
-  // trees.  Good luck.
-  public int setAUCWorkingBinSize(long numrows) {
-    if (numrows <= AUC2.NBINS)
-      return AUC2.NBINS; // no need to change AUC bin size in this case
-
+  // can get different final results.  Per Michal K suggestion, we will be allowing merge within a chunk but
+  // not across chunks.  For the reduce function across chunks, we will concatecate the two histograms of
+  // AUC2.NBINs size.  The only merge will happen at the end after histograms of all NBINs are calculated for
+  // each chunk.  This will ensure reproducibility across same cluster runs with exactly the same machines,
+  // same memory allocations.
+  public int setAUCWorkingBinSize(long numChunks) {
     int nBinsAUC2;
     HeartBeat hb= H2O.SELF._heartbeat;
     long max_mem = H2O.SELF._heartbeat.get_free_mem();
-    if (numrows*2 > Integer.MAX_VALUE)
+    if (numChunks*2*AUC2.NBINS > Integer.MAX_VALUE)
       nBinsAUC2 = Integer.MAX_VALUE/2-1;   // maximum bin size needed.
     else
-      nBinsAUC2 = (int) numrows;
+      nBinsAUC2 = (int) numChunks*AUC2.NBINS;
 
     int overEstimate = 4; // overEstimate true memory need by 4 times
     long mem_per_bin = 2*4*hb._cpus_allowed*8*overEstimate;

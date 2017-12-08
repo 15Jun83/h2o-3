@@ -7,6 +7,7 @@ import hex.glm.GLM;
 import hex.glm.GLMModel;
 import hex.quantile.Quantile;
 import hex.quantile.QuantileModel;
+import hex.tree.gbm.GBMModel;
 import hex.util.LinearAlgebraUtils;
 import jsr166y.CountedCompleter;
 import org.joda.time.format.DateTimeFormat;
@@ -352,16 +353,17 @@ public abstract class SharedTree<M extends SharedTreeModel<M,P,O>, P extends Sha
         initializeModelSpecifics();
         resumeFromCheckpoint(SharedTree.this);
         scoreAndBuildTrees(doOOBScoring());
-        if (_model != null && _model._output!=null && _model._output._training_metrics != null
-                && _model._output._training_metrics.auc_obj()!= null) {
-          if (_model._output._training_metrics.auc_obj()._reproducibilityError) {
+        if ((_model != null) && (_model instanceof GBMModel) && (_model._output != null) &&
+                (_model._output._training_metrics != null)
+                && (_model._output._training_metrics.auc_obj() != null)) {  // only warn if flag _true_reproducibility is enabled
+          if (_model._output._training_metrics.auc_obj()._reproducibilityError && ((GBMModel.GBMParameters) _parms)._true_reproducibility ) {
             Log.warn("GBM warning: "+" There could be reproducibility error across different H2O clusters " +
-                    "runs due to AUC bin merging.");
+                    "runs due to ROC Histogram bin merging.");
             Log.warn("GBM warning: ", "To mitigate this problem, run H2O with more memory, reduce " +
                     "number of trees used and/or reduce tree depth.");
-            warn("GBM warning: ", "There could be reproducibility error across different H2O " +
-                    "clusters runs due to AUC bin merging.  To mitigate this problem, run H2O with more memory," +
-                    " reduce number of trees used and/or reduce tree depth.");
+            _job.warn("GBM warning: There could be reproducibility error across different H2O " +
+                    "clusters runs due to ROC Histogram bin merging.  To mitigate this problem, run H2O with more " +
+                    "memory, reduce number of trees used and/or reduce tree depth.");
           }
         }
 
